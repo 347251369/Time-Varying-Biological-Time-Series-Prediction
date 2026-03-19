@@ -1,4 +1,5 @@
 # Time-Varying-Biological-Time-Series-Prediction
+[图片2.tif](https://github.com/user-attachments/files/26110977/2.tif)
 
 The datasets can be download at the following citations:
 
