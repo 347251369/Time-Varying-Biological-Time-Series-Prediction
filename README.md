@@ -1,6 +1,7 @@
 # Time-Varying-Biological-Time-Series-Prediction
 
 The datasets can be download at the following citations:
+
 Proteomics and Gene: read_dataset.py 
 
 Soler: Lai G, Chang W-C, Yang Y, Liu H: Modeling Long- and Short-Term Temporal Patterns with Deep Neural Networks. In: The 41st International ACM SIGIR Conference. 2018: 95-104.
