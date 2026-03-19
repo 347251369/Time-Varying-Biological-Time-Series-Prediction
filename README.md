@@ -1,4 +1,5 @@
 # Time-Varying-Biological-Time-Series-Prediction
+The time-varying neural network is composed of four parts: (a) data segmentation and decomposition; (b) global prediction module; (c) time-varying predictive module and (d) combination module.
 
 <img width="3923" height="2032" alt="图片1" src="https://github.com/user-attachments/assets/8b194b6e-eb68-42c5-b333-f04d18167448" />
 
