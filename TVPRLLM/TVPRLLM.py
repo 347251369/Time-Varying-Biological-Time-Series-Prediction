@@ -1,0 +1,188 @@
+# -*- coding: utf-8 -*-
+import json
+import pandas as pd
+import torch
+from datasets import Dataset
+from modelscope import snapshot_download, AutoTokenizer
+from peft import LoraConfig, TaskType, get_peft_model
+from transformers import (
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForSeq2Seq,
+)
+import os
+import datetime
+from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import average_precision_score
+
+# gl  l
+K = 'pendulum_' + 'gl' 
+
+def process_func(example):
+    MAX_LENGTH = 384
+    input_ids, attention_mask, labels = [], [], []
+    instruction = tokenizer(
+        f"<|im_start|>system\nYou are an expert in matrix feature analysis, and you will receive a Koopman matrix representing the time-varying patterns of biological systems. Please output the predicted patterns of the biological system based on this matrix.<|im_end|>\n<|im_start|>user\n{example['input']}<|im_end|>\n<|im_start|>assistant\n",
+        add_special_tokens=False,
+    )
+    response = tokenizer(f"{example['output']}", add_special_tokens=False)
+    input_ids = (
+        instruction["input_ids"] + response["input_ids"] + [tokenizer.pad_token_id]
+    )
+    attention_mask = instruction["attention_mask"] + response["attention_mask"] + [1]
+    labels = (
+        [-100] * len(instruction["input_ids"])
+        + response["input_ids"]
+        + [tokenizer.pad_token_id]
+    )
+    if len(input_ids) > MAX_LENGTH:
+        input_ids = input_ids[:MAX_LENGTH]
+        attention_mask = attention_mask[:MAX_LENGTH]
+        labels = labels[:MAX_LENGTH]
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+
+def predict(messages, model, tokenizer):
+    device = "cuda"
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    model_inputs = tokenizer([text], return_tensors="pt").to(device)
+
+    generated_ids = model.generate(model_inputs.input_ids, max_new_tokens=512)
+    generated_ids = [
+        output_ids[len(input_ids) :]
+        for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return response
+
+
+# Download Qwen model
+snapshot_download("qwen/Qwen2-1.5B-Instruct", cache_dir="./", revision="master")
+# Loading Transformers model weight
+tokenizer = AutoTokenizer.from_pretrained("./qwen/Qwen2-1___5B-Instruct/", use_fast=False, trust_remote_code=True)
+
+#AutoModelForSequenceClassification
+Qwen_model = AutoModelForCausalLM.from_pretrained("./qwen/Qwen2-1___5B-Instruct/", device_map="cuda", torch_dtype=torch.bfloat16)
+Qwen_model.enable_input_require_grads()
+
+
+#loading datasets
+fold_k = 3
+X = []
+Y = []
+txt_add = "./output/"+ K
+if not os.path.exists(txt_add):
+    os.makedirs(txt_add)
+
+num = 0
+with open( K + ".jsonl", "r", encoding="utf-8") as file:
+    for line in file:
+        data = json.loads(line)
+        X.append(data['input'])
+        Y.append(data['output'])
+        num = num + 1
+
+len_train = int(num*0.8)
+x_train = [X[i] for i in range(0,len_train,1)]
+y_train = [Y[i] for i in range(0,len_train,1)]
+x_test = [X[i] for i in range(len_train,num,1)]
+y_test = [Y[i] for i in range(len_train,num,1)]
+
+#trainning dataset
+print("Trainning datasets length:" + str(len_train))
+messages = []
+for i in range(0,len_train,1):
+    feature = x_train[i]
+    label = y_train[i]
+    message = {
+            "instruction": "You are an expert in matrix feature analysis, and you will receive a Koopman matrix representing the time-varying patterns of biological systems. Please output the predicted patterns of the biological system based on this matrix.",
+            "input":feature,
+            "output":label,
+        }
+    messages.append(message)
+
+train_df = pd.DataFrame(messages)
+train_ds = Dataset.from_pandas(train_df)
+train_dataset = train_ds.map(process_func, remove_columns=train_ds.column_names)
+
+# config Lora model 1.5B
+config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    target_modules=[
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    ],
+    inference_mode=False,
+    r=16,
+    lora_alpha=32,
+)
+
+# Qwen + Lora
+model = get_peft_model(Qwen_model, config)
+
+# Trainning config
+args = TrainingArguments(
+    output_dir="./output/",
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=2,
+    logging_steps=5,
+    num_train_epochs=2,
+    save_strategy="epoch",
+    learning_rate=1e-4,
+    save_on_each_node=True,
+    gradient_checkpointing=True, # time change spece
+    report_to="none",
+    lr_scheduler_type = "polynomial",
+    max_grad_norm=5.0, 
+    weight_decay=0.01,
+    warmup_ratio=0.05, 
+    seed = 0,
+)
+
+#set trainer
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_dataset,
+    data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
+)
+trainer.train()
+
+# Test dataset
+len_test = num -len_train
+print("Test datasets length:" + str(len_test))
+y_label = []
+y_pred = []
+for i in range(0,len_test,1):
+    instruction = "You are an expert in matrix feature analysis, and you will receive a Koopman matrix representing the time-varying patterns of biological systems. Please output the predicted patterns of the biological system based on this matrix."
+    feature = x_test[i]
+    message = [
+        {"role": "system", "content": f"{instruction}"},
+        {"role": "user", "content": f"{feature}"},
+    ]
+    response = predict(message, model, tokenizer)
+    y_pred.append(int(float(response)))
+    y_label.append(int(float(y_test[i])))
+
+# Statistics
+cm = confusion_matrix(y_label,y_pred)
+TP = cm[1][1]
+TN = cm[0][0]
+FP = cm[0][1]
+FN = cm[1][0]
+pre = (TP)/(TP+FP)
+rec = (TP)/(TP+FN)
+f1 = 2 * pre * rec / (pre + rec)
+auc = average_precision_score(y_label, y_pred)
+out = " pre:"+str(pre) + " rec:" + str(rec) + " f1:"+str(f1) + " auc:"+str(auc)
+with open(txt_add + "/output.txt","a") as file:
+    file.write(out+'\n')
